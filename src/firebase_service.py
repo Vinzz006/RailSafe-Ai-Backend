@@ -121,3 +121,59 @@ def verify_firebase_id_token(token: str, allow_dev_bypass: bool = False) -> Dict
         raise ValueError(f"Invalid Firebase ID token: {e}")
     except Exception as e:
         raise ValueError(f"Authentication failed: {e}")
+
+
+def get_storage_bucket(config: Optional[FirebaseConfig] = None) -> Any:
+    """Return default Firebase Storage bucket, or None if uninitialized or unavailable."""
+    app = get_firebase_app(config)
+    if not app:
+        return None
+    try:
+        bucket_name = (
+            config.storage_bucket
+            if config and config.storage_bucket
+            else os.getenv("FIREBASE_STORAGE_BUCKET", "railsafe-ai-92d9f.firebasestorage.app")
+        )
+        return storage.bucket(bucket_name, app=app)
+    except Exception as e:
+        logger.warning("Firebase Storage bucket access unavailable: %s", e)
+        return None
+
+
+def upload_evidence_blob(
+    blob_path: str,
+    data: bytes,
+    content_type: str = "image/jpeg",
+    config: Optional[FirebaseConfig] = None,
+) -> bool:
+    """Upload binary evidence to Firebase Storage bucket."""
+    bucket = get_storage_bucket(config)
+    if not bucket:
+        return False
+    try:
+        blob = bucket.blob(blob_path)
+        blob.upload_from_string(data, content_type=content_type)
+        logger.info("Successfully uploaded evidence to Firebase Storage: %s", blob_path)
+        return True
+    except Exception as e:
+        logger.warning("Failed to upload evidence to Firebase Storage (%s): %s", blob_path, e)
+        return False
+
+
+def download_evidence_blob(
+    blob_path: str,
+    config: Optional[FirebaseConfig] = None,
+) -> Optional[bytes]:
+    """Download binary evidence from Firebase Storage bucket."""
+    bucket = get_storage_bucket(config)
+    if not bucket:
+        return None
+    try:
+        blob = bucket.blob(blob_path)
+        if blob.exists():
+            return blob.download_as_bytes()
+        return None
+    except Exception as e:
+        logger.warning("Failed to download evidence from Firebase Storage (%s): %s", blob_path, e)
+        return None
+
