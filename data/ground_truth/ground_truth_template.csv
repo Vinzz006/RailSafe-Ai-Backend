@@ -1,0 +1,7 @@
+scenario_id,camera_id,video_file,event_type,start_second,expected_alert_second,end_second,notes
+SCENARIO_01_BAG_ABANDONED,CAM-PLATFORM-01,platform_unattended_01.mp4,unattended_bag,10.0,25.0,45.0,Passenger drops suitcase at 10s and walks away. Expected alert at 25s (15s threshold).
+SCENARIO_02_OWNER_SITTING,CAM-PLATFORM-01,waiting_hall_02.mp4,accompanied_bag,5.0,None,60.0,Passenger sits next to backpack. Negative test: no alert expected.
+SCENARIO_03_OWNER_RETURNS,CAM-PLATFORM-01,platform_return_03.mp4,unattended_bag,12.0,27.0,38.0,Bag left at 12s, alert expected at 27s, passenger returns and picks up at 38s (clearing alert).
+SCENARIO_04_CROWDED_PLATFORM,CAM-PLATFORM-01,crowded_rush_04.mp4,accompanied_bag,0.0,None,90.0,Multiple commuters with luggage walking closely. Negative test: no false alarms.
+SCENARIO_05_NO_INITIAL_OWNER,CAM-PLATFORM-01,concourse_05.mp4,unattended_bag,15.0,30.0,50.0,Backpack placed on bench with no associated owner initially visible.
+SCENARIO_06_BRIEF_OCCLUSION,CAM-PLATFORM-01,platform_occlusion_06.mp4,accompanied_bag,20.0,None,70.0,Owner temporarily occluded by passing train/porter for 2 seconds then reappears.

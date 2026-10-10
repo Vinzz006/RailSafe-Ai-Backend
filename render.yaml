@@ -1,0 +1,28 @@
+# Render Blueprint configuration for RailGuard Vision (Render Free Tier Compatible)
+# Documentation: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: railguard-vision-api
+    runtime: python
+    region: oregon # or singapore / frankfurt
+    plan: free # Runs on 100% Free tier (No persistent disk required)
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn app.api:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.13
+      - key: FIREBASE_PROJECT_ID
+        value: railsafe-ai-92d9f
+      - key: FIRESTORE_ALERTS_COLLECTION
+        value: railguard_alerts
+      - key: FIREBASE_STORAGE_BUCKET
+        value: railsafe-ai-92d9f.firebasestorage.app
+      - key: ALLOW_DEV_AUTH_BYPASS
+        value: "false"
+      - key: RAILGUARD_AGENT_TOKEN
+        generateValue: true
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false # Set as secret in Render Dashboard with service-account JSON

@@ -1,0 +1,48 @@
+# RailGuard Vision Configuration File
+# Note: Thresholds are initial demonstration defaults for Indian Railways surveillance assistance
+
+app:
+  name: "RailGuard Vision"
+  version: "1.0.0"
+  institution: "Indian Railways Surveillance & Security Assistance Prototype"
+  disclaimer: "FOR HUMAN REVIEW ONLY — Does not detect explosives, chemical substances, or narcotics."
+
+video:
+  source: 0 # 0 for default webcam, or string path to MP4, or RTSP stream URL
+  camera_id: "CAM-PLATFORM-01"
+  target_width: 640
+  target_height: 480
+  frame_skip: 1 # Process every Nth frame (1 = process every frame, 2 = process every other frame)
+  buffer_seconds: 10 # Rolling frame buffer for pre-alert context
+
+model:
+  weights: "yolov8n.pt" # Default model weights
+  confidence_threshold: 0.35
+  iou_threshold: 0.45
+  device: "cpu" # 'cpu' or 'cuda'
+  input_size: 640
+
+rules:
+  stationary_pixels: 18
+  stationary_window_seconds: 5
+  proximity_pixels: 140
+  warning_seconds: 4
+  unattended_seconds: 15
+  track_drop_grace_seconds: 2.5
+  owner_left_grace_seconds: 8
+  loiter_seconds: 90
+  restricted_zone_enabled: false
+  restricted_zone_polygon: [[20, 20], [300, 20], [300, 200], [20, 200]]
+  bag_classes: ["backpack", "handbag", "suitcase"]
+  person_class: "person"
+
+storage:
+  db_path: "data/security_alerts.db"
+  alerts_dir: "data/alerts"
+  clips_dir: "data/clips"
+  pre_alert_seconds: 5.0
+  post_alert_seconds: 5.0
+
+evaluation:
+  ground_truth_path: "data/ground_truth/ground_truth_template.csv"
+  time_tolerance_seconds: 4.0
