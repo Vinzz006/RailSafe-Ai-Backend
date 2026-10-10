@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set
 
+import hmac
 from fastapi import (
     Depends,
     FastAPI,
@@ -31,12 +32,18 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from src.config import SystemConfig, load_config
-from src.firebase_service import get_firebase_app, get_firestore_db, verify_firebase_id_token
+from src.firebase_service import (
+    download_evidence_blob,
+    get_firebase_app,
+    get_firestore_db,
+    upload_evidence_blob,
+    verify_firebase_id_token,
+)
 from src.firestore_repository import FirestoreAlertRepository
 
 # Configure sanitized logging
@@ -210,7 +217,11 @@ def verify_agent_token(
 
     expected_agent = config.security.agent_token
 
-    if not provided_token or provided_token != expected_agent:
+    if (
+        not provided_token
+        or not expected_agent
+        or not hmac.compare_digest(provided_token.strip(), expected_agent.strip())
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Unauthorized: Invalid camera ingestion agent token.",
@@ -306,6 +317,24 @@ def validate_safe_evidence_path(filepath_str: str) -> Path:
 # ============================================================================
 # Health & Status Endpoints
 # ============================================================================
+@app.get("/", tags=["System"])
+def root_info() -> Dict[str, Any]:
+    """Public service discovery and root endpoint."""
+    return {
+        "service": "RailGuard Vision Cloud Backend",
+        "version": config.app.version,
+        "status": "online",
+        "persistence": "Cloud Firestore",
+        "endpoints": {
+            "health": "/health",
+            "readiness": "/ready",
+            "alerts": "/api/alerts",
+            "docs": "/docs",
+        },
+        "disclaimer": config.app.disclaimer,
+    }
+
+
 @app.get("/health", tags=["System"])
 def health_check() -> Dict[str, Any]:
     """Lightweight health check for Render process monitoring (Independent of Firestore)."""
@@ -320,10 +349,9 @@ def health_check() -> Dict[str, Any]:
 
 @app.get("/ready", tags=["System"])
 def readiness_check(
-    _user: Dict[str, Any] = Depends(verify_firebase_operator),
     repo: FirestoreAlertRepository = Depends(get_repository),
 ) -> Dict[str, Any]:
-    """Protected readiness check confirming Firestore database accessibility."""
+    """Public readiness check confirming Firestore database accessibility without disclosing secrets."""
     if not repo.check_readiness():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -398,6 +426,14 @@ async def ingest_alert(
     with open(snap_dest, "wb") as f:
         f.write(snap_bytes)
 
+    # Persist snapshot to Cloud Storage when Firebase Storage is available
+    upload_evidence_blob(
+        f"alerts/{snap_filename}",
+        snap_bytes,
+        content_type="image/jpeg",
+        config=config.firebase,
+    )
+
     clip_filename: Optional[str] = None
     if clip is not None and clip.filename:
         clip_bytes = await clip.read()
@@ -408,6 +444,15 @@ async def ingest_alert(
         clip_dest = CONTAINER_CLIPS_DIR / clip_filename
         with open(clip_dest, "wb") as f:
             f.write(clip_bytes)
+
+        # Persist clip to Cloud Storage when Firebase Storage is available
+        clip_mime = "video/mp4" if ext == ".mp4" else "video/x-msvideo"
+        upload_evidence_blob(
+            f"clips/{clip_filename}",
+            clip_bytes,
+            content_type=clip_mime,
+            config=config.firebase,
+        )
 
     # 3. Create document in Cloud Firestore
     doc_data = {
@@ -556,7 +601,7 @@ def get_alert_snapshot(
     alert_id: str,
     _user: Dict[str, Any] = Depends(verify_firebase_operator),
     repo: FirestoreAlertRepository = Depends(get_repository),
-) -> FileResponse:
+) -> Response:
     """Retrieve verified JPEG snapshot evidence for an alert."""
     doc = repo.get_alert(alert_id)
     if not doc:
@@ -567,13 +612,24 @@ def get_alert_snapshot(
         raise HTTPException(status_code=404, detail="No snapshot registered for this alert.")
 
     snap_file = CONTAINER_SNAPSHOTS_DIR / snap_key
-    safe_file = validate_safe_evidence_path(str(snap_file))
+    if snap_file.is_file():
+        safe_file = validate_safe_evidence_path(str(snap_file))
+        return FileResponse(
+            path=safe_file,
+            media_type="image/jpeg",
+            filename=safe_file.name,
+        )
 
-    return FileResponse(
-        path=safe_file,
-        media_type="image/jpeg",
-        filename=safe_file.name,
-    )
+    # Check Firebase Storage if ephemeral container cache is missing
+    blob_bytes = download_evidence_blob(f"alerts/{snap_key}", config=config.firebase)
+    if blob_bytes:
+        try:
+            snap_file.write_bytes(blob_bytes)
+        except Exception:
+            pass
+        return Response(content=blob_bytes, media_type="image/jpeg")
+
+    raise HTTPException(status_code=404, detail="Evidence file not found on storage.")
 
 
 @app.get("/api/alerts/{alert_id}/clip", tags=["Evidence"])
@@ -581,7 +637,7 @@ def get_alert_clip(
     alert_id: str,
     _user: Dict[str, Any] = Depends(verify_firebase_operator),
     repo: FirestoreAlertRepository = Depends(get_repository),
-) -> FileResponse:
+) -> Response:
     """Retrieve contextual MP4 video clip for an alert."""
     doc = repo.get_alert(alert_id)
     if not doc:
@@ -592,14 +648,26 @@ def get_alert_clip(
         raise HTTPException(status_code=404, detail="No video clip available for this alert.")
 
     clip_file = CONTAINER_CLIPS_DIR / clip_key
-    safe_file = validate_safe_evidence_path(str(clip_file))
-    media_type = "video/mp4" if safe_file.suffix.lower() == ".mp4" else "video/x-msvideo"
+    if clip_file.is_file():
+        safe_file = validate_safe_evidence_path(str(clip_file))
+        media_type = "video/mp4" if safe_file.suffix.lower() == ".mp4" else "video/x-msvideo"
+        return FileResponse(
+            path=safe_file,
+            media_type=media_type,
+            filename=safe_file.name,
+        )
 
-    return FileResponse(
-        path=safe_file,
-        media_type=media_type,
-        filename=safe_file.name,
-    )
+    # Check Firebase Storage if ephemeral container cache is missing
+    blob_bytes = download_evidence_blob(f"clips/{clip_key}", config=config.firebase)
+    if blob_bytes:
+        try:
+            clip_file.write_bytes(blob_bytes)
+        except Exception:
+            pass
+        media_type = "video/mp4" if clip_key.endswith(".mp4") else "video/x-msvideo"
+        return Response(content=blob_bytes, media_type=media_type)
+
+    raise HTTPException(status_code=404, detail="Video clip evidence not found on storage.")
 
 
 # ============================================================================
