@@ -41,6 +41,7 @@ class IngestTask:
     cleared_timestamp: str = ""
     event_uid: str = ""
     retry_count: int = 0
+    non_retryable: bool = False
 
 
 class CloudForwarder:
@@ -124,14 +125,14 @@ class CloudForwarder:
             success = False
             try:
                 if task.task_type == "alert" and task.alert_record:
-                    success = self._upload_alert(task.alert_record, task.event_uid)
+                    success = self._upload_alert(task.alert_record, task.event_uid, task=task)
                 elif task.task_type == "clear":
-                    success = self._upload_clear(task.camera_id, task.track_id, task.cleared_timestamp)
+                    success = self._upload_clear(task.camera_id, task.track_id, task.cleared_timestamp, task=task)
             except Exception as e:
                 logger.warning("Error processing cloud upload task: %s", e)
                 success = False
 
-            if not success and task.retry_count < self.max_retries:
+            if not success and not task.non_retryable and task.retry_count < self.max_retries:
                 task.retry_count += 1
                 backoff = min(2 ** task.retry_count, 30)
                 logger.info("Task failed. Retrying in %ds (attempt %d/%d)", backoff, task.retry_count, self.max_retries)
@@ -141,19 +142,38 @@ class CloudForwarder:
                 except queue.Full:
                     logger.warning("Queue full during retry requeue; dropping task %s", task.event_uid)
             elif not success:
-                logger.error("Task %s exceeded max retries (%d). Abandoning upload.", task.event_uid, self.max_retries)
+                if task.non_retryable:
+                    logger.error("Task %s rejected with non-retryable error (e.g. invalid credentials). Abandoning.", task.event_uid)
+                else:
+                    logger.error("Task %s exceeded max retries (%d). Abandoning upload.", task.event_uid, self.max_retries)
 
             self._queue.task_done()
 
-    def _upload_alert(self, alert: AlertRecord, event_uid: str) -> bool:
-        """Execute authenticated multipart HTTP upload to cloud backend."""
+    def _upload_alert(
+        self,
+        alert: AlertRecord,
+        event_uid: str,
+        task: Optional[IngestTask] = None,
+    ) -> bool:
+        """Execute authenticated multipart HTTP upload to cloud backend.
+        
+        Returns:
+            bool: True on success (HTTP 200/201), False otherwise.
+        """
+        if not self.agent_token or not self.agent_token.strip():
+            logger.error("Upload aborted for %s: Missing agent token. Ingestion requires RAILGUARD_AGENT_TOKEN.", event_uid)
+            if task:
+                task.non_retryable = True
+            return False
+
         snap_path = Path(alert.snapshot_path)
         if not snap_path.is_file():
             logger.error("Snapshot file %s not found on disk. Cannot upload alert.", snap_path)
+            if task:
+                task.non_retryable = True
             return False
 
         files: Dict[str, Any] = {}
-        # Open snapshot file
         snap_file = open(snap_path, "rb")
         files["snapshot"] = (snap_path.name, snap_file, "image/jpeg")
 
@@ -175,7 +195,7 @@ class CloudForwarder:
         }
 
         headers = {
-            "Authorization": f"Bearer {self.agent_token}",
+            "Authorization": f"Bearer {self.agent_token.strip()}",
         }
 
         url = f"{self.cloud_url}/api/ingest/alerts"
@@ -185,6 +205,16 @@ class CloudForwarder:
                 if res.status_code in (200, 201):
                     logger.info("Successfully uploaded alert %s to cloud (HTTP %d)", event_uid, res.status_code)
                     return True
+                elif res.status_code in (401, 403):
+                    logger.error(
+                        "Cloud backend rejected alert %s (HTTP %d %s). Token invalid or unauthorized.",
+                        event_uid,
+                        res.status_code,
+                        res.text.strip(),
+                    )
+                    if task:
+                        task.non_retryable = True
+                    return False
                 else:
                     logger.warning("Cloud upload rejected (HTTP %d): %s", res.status_code, res.text)
                     return False
@@ -196,15 +226,31 @@ class CloudForwarder:
             if clip_file:
                 clip_file.close()
 
-    def _upload_clear(self, camera_id: str, track_id: int, cleared_timestamp: str) -> bool:
-        """Execute clear notification upload."""
+    def _upload_clear(
+        self,
+        camera_id: str,
+        track_id: int,
+        cleared_timestamp: str,
+        task: Optional[IngestTask] = None,
+    ) -> bool:
+        """Execute clear notification upload.
+        
+        Returns:
+            bool: True on success (HTTP 200), False otherwise.
+        """
+        if not self.agent_token or not self.agent_token.strip():
+            logger.error("Clear upload aborted: Missing agent token. Ingestion requires RAILGUARD_AGENT_TOKEN.")
+            if task:
+                task.non_retryable = True
+            return False
+
         payload = {
             "camera_id": camera_id,
             "track_id": track_id,
             "cleared_timestamp": cleared_timestamp,
         }
         headers = {
-            "Authorization": f"Bearer {self.agent_token}",
+            "Authorization": f"Bearer {self.agent_token.strip()}",
             "Content-Type": "application/json",
         }
         url = f"{self.cloud_url}/api/ingest/alerts/clear"
@@ -214,12 +260,22 @@ class CloudForwarder:
                 if res.status_code == 200:
                     logger.info("Successfully updated cleared state for cam=%s trk=%d in cloud", camera_id, track_id)
                     return True
+                elif res.status_code in (401, 403):
+                    logger.error(
+                        "Cloud backend rejected clear event (HTTP %d %s). Token invalid or unauthorized.",
+                        res.status_code,
+                        res.text.strip(),
+                    )
+                    if task:
+                        task.non_retryable = True
+                    return False
                 else:
                     logger.warning("Cloud clear rejected (HTTP %d): %s", res.status_code, res.text)
                     return False
         except httpx.RequestError as e:
             logger.warning("Network failure connecting to cloud clear endpoint: %s", e)
             return False
+
 
 
 class LocalDetectionAgent:
@@ -230,15 +286,29 @@ class LocalDetectionAgent:
         config: Optional[SystemConfig] = None,
         cloud_url: Optional[str] = None,
         agent_token: Optional[str] = None,
+        enable_cloud: bool = True,
     ) -> None:
         self.config = config or load_config()
-        self.cloud_url = cloud_url or os.getenv("RAILGUARD_CLOUD_URL", "http://localhost:8000")
-        self.agent_token = agent_token or os.getenv("RAILGUARD_AGENT_TOKEN", self.config.security.agent_token)
+        # Precedence: Explicit parameter > RAILGUARD_CLOUD_URL env > default URL
+        self.cloud_url = (
+            cloud_url
+            or os.getenv("RAILGUARD_CLOUD_URL")
+            or "https://railsafe-ai-backend.onrender.com"
+        ).rstrip("/")
+
+        # Precedence: Explicit parameter > RAILGUARD_AGENT_TOKEN env > None
+        resolved_token = agent_token if agent_token is not None else os.getenv("RAILGUARD_AGENT_TOKEN")
+        self.agent_token = resolved_token.strip() if resolved_token else None
+        self.enable_cloud = enable_cloud
 
         self.pipeline = RailGuardPipeline(self.config)
-        self.forwarder = CloudForwarder(
-            cloud_url=self.cloud_url,
-            agent_token=self.agent_token,
+        self.forwarder = (
+            CloudForwarder(
+                cloud_url=self.cloud_url,
+                agent_token=self.agent_token or "",
+            )
+            if self.enable_cloud
+            else None
         )
         self.db = self.pipeline.db
         self._running = False
@@ -250,7 +320,16 @@ class LocalDetectionAgent:
             logger.error("Failed to initialize local video pipeline.")
             return False
 
-        self.forwarder.start()
+        if self.forwarder is not None:
+            if not self.agent_token:
+                logger.warning(
+                    "[LOCAL_AGENT] Cloud forwarder active without agent token. "
+                    "Uploads will fail. Pass --token or set RAILGUARD_AGENT_TOKEN."
+                )
+            self.forwarder.start()
+        else:
+            logger.info("[LOCAL_AGENT] Cloud forwarding disabled. Running in offline/local-only mode.")
+
         self._running = True
         logger.info("LocalDetectionAgent started on source: %s", self.config.video.source)
         return True
@@ -260,16 +339,17 @@ class LocalDetectionAgent:
         result = self.pipeline.step()
 
         # Handle newly raised alerts
-        for db_id in result.new_db_alert_ids:
-            record = self.db.get_alert_by_id(db_id)
-            if record:
-                event_uid = record.event_uid or f"EVT_{record.camera_id}_T{record.track_id}_{int(time.time())}"
-                self.forwarder.enqueue_alert(record, event_uid)
+        if self.forwarder is not None:
+            for db_id in result.new_db_alert_ids:
+                record = self.db.get_alert_by_id(db_id)
+                if record:
+                    event_uid = record.event_uid or f"EVT_{record.camera_id}_T{record.track_id}_{int(time.time())}"
+                    self.forwarder.enqueue_alert(record, event_uid)
 
-        # Handle cleared alerts
-        for clr in result.cleared_alerts:
-            iso_cleared = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(clr.timestamp))
-            self.forwarder.enqueue_clear(clr.camera_id, clr.track_id, iso_cleared)
+            # Handle cleared alerts
+            for clr in result.cleared_alerts:
+                iso_cleared = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(clr.timestamp))
+                self.forwarder.enqueue_clear(clr.camera_id, clr.track_id, iso_cleared)
 
         return result
 
@@ -277,5 +357,7 @@ class LocalDetectionAgent:
         """Gracefully release camera and stop background forwarder."""
         self._running = False
         self.pipeline.stop()
-        self.forwarder.stop()
+        if self.forwarder is not None:
+            self.forwarder.stop()
         logger.info("LocalDetectionAgent shut down cleanly.")
+
