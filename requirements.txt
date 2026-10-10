@@ -1,20 +1,20 @@
 # RailGuard Vision Dependencies
 # Python 3.10+ required
-opencv-python>=4.8.0
-ultralytics>=8.1.0
-torch>=2.0.0
-torchvision>=0.15.0
-fastapi>=0.109.0
-uvicorn[standard]>=0.27.0
-pydantic>=2.5.0
-python-multipart>=0.0.9
-firebase-admin>=6.2.0
-httpx>=0.26.0
-aiofiles>=23.2.0
-streamlit>=1.30.0
-PyYAML>=6.0.0
-pytest>=8.0.0
-pandas>=2.0.0
-numpy>=1.24.0
-pillow>=10.0.0
+opencv-python
+ultralytics
+torch
+torchvision
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
+firebase-admin
+httpx
+aiofiles
+streamlit
+PyYAML
+pytest
+pandas
+numpy
+pillow
 
