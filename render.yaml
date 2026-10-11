@@ -16,6 +16,10 @@ services:
         value: 3.10.13
       - key: FIREBASE_PROJECT_ID
         value: railsafe-ai-92d9f
+      - key: FIREBASE_DATABASE_URL
+        value: https://railsafe-ai-92d9f-default-rtdb.asia-southeast1.firebasedatabase.app/
+      - key: RTDB_ALERTS_PATH
+        value: railguard/alerts
       - key: FIRESTORE_ALERTS_COLLECTION
         value: railguard_alerts
       - key: FIREBASE_STORAGE_BUCKET
