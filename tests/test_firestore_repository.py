@@ -50,7 +50,7 @@ class MockCollectionReference:
         for k, v in self.storage.items():
             if op == "==" and v.get(field) == value:
                 filtered[k] = v
-        return MockCollectionReference(filtered)
+        return self.__class__(filtered)
 
     def order_by(self, field: str, direction: str = "ASCENDING") -> "MockCollectionReference":
         return self
@@ -164,3 +164,32 @@ def test_repository_cleared_timestamp_and_false_alarm_rate() -> None:
     assert total == 2
     assert false_alarms == 1
     assert rate == 0.5
+
+
+def test_list_alerts_composite_index_fallback() -> None:
+    """Verify list_alerts catches composite index errors, logs warning, and sorts in memory."""
+    storage = {
+        "EVT-1": {"event_uid": "EVT-1", "review_status": "unreviewed", "created_at": "2026-10-11T01:00:00Z"},
+        "EVT-2": {"event_uid": "EVT-2", "review_status": "unreviewed", "created_at": "2026-10-11T01:10:00Z"},
+    }
+
+    class IndexFailingQuery(MockCollectionReference):
+        def stream(self):
+            # Simulate Google Cloud FailedPrecondition on indexed stream
+            raise Exception("FAILED_PRECONDITION: The query requires an index: https://console.firebase.google.com/...")
+
+    class FallbackCollection(MockCollectionReference):
+        def order_by(self, field: str, direction: str = "ASCENDING"):
+            return IndexFailingQuery(self.storage)
+
+    class FallbackClient:
+        def collection(self, name: str):
+            return FallbackCollection(storage)
+
+    repo = FirestoreAlertRepository(collection_name="test_alerts", db_client=FallbackClient())
+    results = repo.list_alerts(limit=50, unreviewed_only=True)
+    assert len(results) == 2
+    # Verify sorted in descending order by created_at in memory fallback
+    assert results[0]["event_uid"] == "EVT-2"
+    assert results[1]["event_uid"] == "EVT-1"
+
