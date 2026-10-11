@@ -88,6 +88,11 @@ class SecurityConfig:
 @dataclass
 class FirebaseConfig:
     project_id: str = "railsafe-ai-92d9f"
+    database_url: str = (
+        "https://railsafe-ai-92d9f-default-rtdb.asia-southeast1.firebasedatabase.app/"
+    )
+    rtdb_alerts_path: str = "railguard/alerts"
+    rtdb_event_uid_index_path: str = "railguard/event_uid_index"
     service_account_json: Optional[str] = None
     service_account_path: Optional[str] = None
     alerts_collection: str = "railguard_alerts"
@@ -241,6 +246,10 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> SystemConfig:
     env_fb_project = os.getenv("FIREBASE_PROJECT_ID")
     if env_fb_project:
         firebase_data["project_id"] = env_fb_project
+
+    env_fb_db_url = os.getenv("FIREBASE_DATABASE_URL")
+    if env_fb_db_url:
+        firebase_data["database_url"] = env_fb_db_url.strip()
 
     env_fb_sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
     if env_fb_sa_json:
