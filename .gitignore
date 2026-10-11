@@ -1,0 +1,28 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest cache
+.pytest_cache/
+
+# Environments and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*service_account*.json
+*service-account*.json
+*credentials*.json
+
+# Data and evidence directories
+data/alerts/
+data/clips/
+data/*.db
+data/*.sqlite
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

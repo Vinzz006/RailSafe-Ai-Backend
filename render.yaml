@@ -20,6 +20,8 @@ services:
         value: https://railsafe-ai-92d9f-default-rtdb.asia-southeast1.firebasedatabase.app/
       - key: RTDB_ALERTS_PATH
         value: railguard/alerts
+      - key: RTDB_EVENT_UID_INDEX_PATH
+        value: railguard/event_uid_index
       - key: FIRESTORE_ALERTS_COLLECTION
         value: railguard_alerts
       - key: FIREBASE_STORAGE_BUCKET
@@ -27,7 +29,7 @@ services:
       - key: ALLOW_DEV_AUTH_BYPASS
         value: "false"
       - key: CORS_ALLOWED_ORIGINS
-        value: "http://localhost:54313"
+        value: "https://railsafe-ai-92d9f.web.app,https://railsafe-ai-92d9f.firebaseapp.com,http://localhost:54313"
       - key: RAILGUARD_AGENT_TOKEN
         generateValue: true
       - key: FIREBASE_SERVICE_ACCOUNT_JSON

@@ -126,13 +126,13 @@ def test_env() -> Generator[dict, None, None]:
 
 
 def test_health_check(test_env: dict) -> None:
-    """Verify GET /health executes without requiring /var/data or Firestore connectivity."""
+    """Verify GET /health executes without requiring /var/data or database connectivity."""
     client: TestClient = test_env["client"]
     res = client.get("/health")
     assert res.status_code == 200
     data = res.json()
     assert data["status"] == "healthy"
-    assert data["persistence"] == "Cloud Firestore"
+    assert data["persistence"] == "Firebase Realtime Database"
     assert "FOR HUMAN REVIEW ONLY" in data["disclaimer"]
     # Ensure no internal tokens or secrets are leaked
     body_str = res.text
@@ -154,7 +154,7 @@ def test_root_info_endpoint(test_env: dict) -> None:
 
 
 def test_readiness_check_healthy_and_unhealthy(test_env: dict) -> None:
-    """Verify GET /ready correctly handles healthy and unhealthy Firestore dependencies."""
+    """Verify GET /ready correctly handles healthy and unhealthy Realtime Database dependencies."""
     client: TestClient = test_env["client"]
     repo: MockFirestoreRepository = test_env["repo"]
 
@@ -162,9 +162,10 @@ def test_readiness_check_healthy_and_unhealthy(test_env: dict) -> None:
     res = client.get("/ready")
     assert res.status_code == 200
     assert res.json()["status"] == "ready"
+    assert res.json()["rtdb_connected"] is True
     assert res.json()["firestore_connected"] is True
 
-    # 2. Unhealthy state (simulated Firestore disconnection) -> 503 Service Unavailable
+    # 2. Unhealthy state (simulated Realtime Database disconnection) -> 503 Service Unavailable
     repo.check_readiness = lambda: False
     res_down = client.get("/ready")
     assert res_down.status_code == 503

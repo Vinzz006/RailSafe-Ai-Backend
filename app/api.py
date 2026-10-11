@@ -111,7 +111,9 @@ def get_repository() -> RealtimeDatabaseAlertRepository:
         try:
             get_firebase_app(config.firebase)
             _repository_instance = RealtimeDatabaseAlertRepository(
-                base_path=config.firebase.rtdb_alerts_path
+                base_path=config.firebase.rtdb_alerts_path,
+                alerts_path=config.firebase.rtdb_alerts_path,
+                event_uid_index_path=config.firebase.rtdb_event_uid_index_path,
             )
         except Exception as e:
             logger.error("Failed to connect to Firebase Realtime Database: %s", e)
@@ -149,13 +151,14 @@ app = FastAPI(
 
 # Determine allowed CORS origins from security configuration
 cors_origins: List[str] = config.security.cors_allowed_origins
+allow_all = "*" in cors_origins
 logger.info("Configured CORS allowed origins: %s", cors_origins)
 
 # Enable secure CORS middleware for Flutter web and mobile
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_credentials=True,
+    allow_credentials=not allow_all,
     allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
     allow_headers=[
         "Authorization",
@@ -175,8 +178,11 @@ def _apply_cors_headers(headers: Dict[str, str], request: Request) -> None:
     """Ensure permitted origins receive CORS headers even on error responses."""
     origin = request.headers.get("origin")
     if origin and (origin in cors_origins or "*" in cors_origins):
-        headers["Access-Control-Allow-Origin"] = origin
-        headers["Access-Control-Allow-Credentials"] = "true"
+        if "*" in cors_origins and origin not in cors_origins:
+            headers["Access-Control-Allow-Origin"] = "*"
+        else:
+            headers["Access-Control-Allow-Origin"] = origin
+            headers["Access-Control-Allow-Credentials"] = "true"
         headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, PUT, DELETE, OPTIONS"
         headers["Access-Control-Allow-Headers"] = (
             "Authorization, Content-Type, Accept, Origin, X-Requested-With, "
@@ -230,8 +236,12 @@ def verify_firebase_operator(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Allow development / demo token bypass if explicitly enabled
-    if config.firebase.allow_dev_auth_bypass and raw_token in (
+    # Allow development / demo token bypass if explicitly enabled and NOT in production
+    is_prod = (
+        os.getenv("RENDER") is not None
+        or os.getenv("ENVIRONMENT", "").strip().lower() in ("production", "prod")
+    )
+    if not is_prod and config.firebase.allow_dev_auth_bypass and raw_token in (
         "DEMO_OFFICER_TOKEN",
         "dev-test-token",
         "test-operator-token",
@@ -435,6 +445,7 @@ def readiness_check(
     return {
         "status": "ready",
         "rtdb_connected": True,
+        "firestore_connected": True,
         "project_id": config.firebase.project_id,
         "database_url": config.firebase.database_url,
         "alerts_path": config.firebase.rtdb_alerts_path,

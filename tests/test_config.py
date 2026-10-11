@@ -83,9 +83,50 @@ def test_env_var_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RAILGUARD_CAMERA_ID", "CAM-ENV-01")
     monkeypatch.setenv("RAILGUARD_MODEL_WEIGHTS", "yolov8m.pt")
     monkeypatch.setenv("RAILGUARD_DB_PATH", "custom_alerts.db")
+    monkeypatch.setenv("RTDB_ALERTS_PATH", "custom_railguard/custom_alerts")
+    monkeypatch.setenv("RTDB_EVENT_UID_INDEX_PATH", "custom_railguard/custom_index")
 
     cfg = load_config()
     assert cfg.video.source == "rtsp://secure-camera.local/feed"
     assert cfg.video.camera_id == "CAM-ENV-01"
     assert cfg.model.weights == "yolov8m.pt"
     assert cfg.storage.db_path == "custom_alerts.db"
+    assert cfg.firebase.rtdb_alerts_path == "custom_railguard/custom_alerts"
+    assert cfg.firebase.rtdb_event_uid_index_path == "custom_railguard/custom_index"
+
+
+def test_cors_origin_parsing_and_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test CORS origin parsing, trailing slash trimming, and production isolation."""
+    # 1. In production (RENDER=true), do NOT automatically append localhost
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "https://railsafe-ai.web.app/ , https://operator.railsafe.in")
+
+    cfg_prod = load_config()
+    assert "https://railsafe-ai.web.app" in cfg_prod.security.cors_allowed_origins
+    assert "https://operator.railsafe.in" in cfg_prod.security.cors_allowed_origins
+    assert "http://localhost:54313" not in cfg_prod.security.cors_allowed_origins
+
+    # 2. In local dev (no RENDER), default origins are provided when empty
+    monkeypatch.delenv("RENDER", raising=False)
+    monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "")
+
+    cfg_dev = load_config()
+    assert "http://localhost:54313" in cfg_dev.security.cors_allowed_origins
+
+
+def test_production_auth_bypass_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure development auth bypass is strictly disabled when RENDER or ENVIRONMENT=production is set."""
+    # Attempt to enable bypass on Render
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("ALLOW_DEV_AUTH_BYPASS", "true")
+
+    cfg = load_config()
+    assert cfg.firebase.allow_dev_auth_bypass is False
+
+    # In local development, bypass can be enabled
+    monkeypatch.delenv("RENDER", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.setenv("ALLOW_DEV_AUTH_BYPASS", "true")
+
+    cfg_dev = load_config()
+    assert cfg_dev.firebase.allow_dev_auth_bypass is True

@@ -154,6 +154,21 @@ def find_default_config_path() -> Optional[Path]:
     return None
 
 
+def is_production_env() -> bool:
+    """Detect if running in a production deployment environment (Render or ENVIRONMENT=production)."""
+    return (
+        os.getenv("RENDER") is not None
+        or os.getenv("ENVIRONMENT", "").strip().lower() in ("production", "prod")
+    )
+
+
+def parse_bool_env(val: Optional[str], default: bool = False) -> bool:
+    """Parse boolean environment variables safely and consistently."""
+    if val is None:
+        return default
+    return str(val).strip().lower() in ("true", "1", "yes", "y", "on", "t")
+
+
 def load_config(config_path: Optional[Union[str, Path]] = None) -> SystemConfig:
     """Load system configuration from YAML file with environment variable overrides."""
     resolved_path: Optional[Path] = None
@@ -174,13 +189,14 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> SystemConfig:
         except Exception:
             raw = {}
 
-    app_data = raw.get("app", {})
-    video_data = raw.get("video", {})
-    model_data = raw.get("model", {})
-    rules_data = raw.get("rules", {})
-    storage_data = raw.get("storage", {})
-    security_data = raw.get("security", {})
-    eval_data = raw.get("evaluation", {})
+    app_data = dict(raw.get("app", {}))
+    video_data = dict(raw.get("video", {}))
+    model_data = dict(raw.get("model", {}))
+    rules_data = dict(raw.get("rules", {}))
+    storage_data = dict(raw.get("storage", {}))
+    security_data = dict(raw.get("security", {}))
+    eval_data = dict(raw.get("evaluation", {}))
+    firebase_data = dict(raw.get("firebase", {}))
 
     # Environment variable overrides
     env_data_dir = os.getenv("RAILGUARD_DATA_DIR")
@@ -230,19 +246,25 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> SystemConfig:
         security_data["agent_token"] = env_agent_token
 
     env_cors = os.getenv("CORS_ALLOWED_ORIGINS")
-    if env_cors:
+    if env_cors is not None:
         origins = []
         for item in env_cors.split(","):
             cleaned = item.strip().rstrip("/")
-            if cleaned and cleaned not in origins:
-                origins.append(cleaned)
-        # Ensure development origin is included unless explicitly restricted
-        if "http://localhost:54313" not in origins:
-            origins.append("http://localhost:54313")
+            if cleaned:
+                if cleaned == "*" or cleaned.startswith("http://") or cleaned.startswith("https://"):
+                    if cleaned not in origins:
+                        origins.append(cleaned)
+        # Only inject localhost origins if not in production and no explicit origins were parsed
+        if not is_production_env() and not origins:
+            origins = [
+                "http://localhost:54313",
+                "http://127.0.0.1:54313",
+                "http://localhost:3000",
+                "http://localhost:8000",
+            ]
         security_data["cors_allowed_origins"] = origins
 
     # Firebase environment variable overrides
-    firebase_data = raw.get("firebase", {})
     env_fb_project = os.getenv("FIREBASE_PROJECT_ID")
     if env_fb_project:
         firebase_data["project_id"] = env_fb_project
@@ -250,6 +272,14 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> SystemConfig:
     env_fb_db_url = os.getenv("FIREBASE_DATABASE_URL")
     if env_fb_db_url:
         firebase_data["database_url"] = env_fb_db_url.strip()
+
+    env_fb_rtdb_alerts = os.getenv("RTDB_ALERTS_PATH")
+    if env_fb_rtdb_alerts:
+        firebase_data["rtdb_alerts_path"] = env_fb_rtdb_alerts.strip()
+
+    env_fb_rtdb_index = os.getenv("RTDB_EVENT_UID_INDEX_PATH")
+    if env_fb_rtdb_index:
+        firebase_data["rtdb_event_uid_index_path"] = env_fb_rtdb_index.strip()
 
     env_fb_sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
     if env_fb_sa_json:
@@ -268,8 +298,10 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> SystemConfig:
         firebase_data["storage_bucket"] = env_fb_bucket
 
     env_fb_bypass = os.getenv("ALLOW_DEV_AUTH_BYPASS")
-    if env_fb_bypass is not None:
-        firebase_data["allow_dev_auth_bypass"] = env_fb_bypass.lower() in ("true", "1", "yes")
+    if is_production_env():
+        firebase_data["allow_dev_auth_bypass"] = False
+    elif env_fb_bypass is not None:
+        firebase_data["allow_dev_auth_bypass"] = parse_bool_env(env_fb_bypass)
 
     # Video source type conversion
     src_val = video_data.get("source", 0)
