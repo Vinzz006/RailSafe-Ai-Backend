@@ -98,28 +98,55 @@ class FirestoreAlertRepository:
         review_status: Optional[str] = None,
         unreviewed_only: bool = False,
     ) -> List[Dict[str, Any]]:
-        """List alerts from Firestore with optional filtering."""
+        """List alerts from Firestore with optional filtering.
+        
+        Gracefully handles missing Firestore composite indexes by catching
+        query evaluation errors and falling back to filtering with in-memory sorting.
+        """
+        limit = max(1, min(limit, 500))
         query = self.collection
 
-        if unreviewed_only:
-            query = query.where("review_status", "==", "unreviewed")
-        elif review_status:
-            query = query.where("review_status", "==", review_status)
+        target_status = "unreviewed" if unreviewed_only else review_status
+        if target_status and target_status.lower() in ("all", ""):
+            target_status = None
 
+        if target_status:
+            query = query.where("review_status", "==", target_status)
+
+        # Attempt 1: Native indexed query with descending creation timestamp ordering
         try:
-            query = query.order_by("created_at", direction="DESCENDING")
-        except Exception:
-            pass  # Fallback if compound index is still building in Firestore
+            ordered_query = query.order_by("created_at", direction="DESCENDING").limit(limit)
+            docs = list(ordered_query.stream())
+            results: List[Dict[str, Any]] = []
+            for doc in docs:
+                item = doc.to_dict() or {}
+                item["id"] = doc.id
+                results.append(item)
+            return results
+        except Exception as e:
+            logger.warning(
+                "Firestore ordered query failed (likely composite index required for (review_status, created_at)): %s. "
+                "Falling back to unindexed query with in-memory descending sort.",
+                e,
+            )
 
-        query = query.limit(limit)
-        docs = query.stream()
-
-        results: List[Dict[str, Any]] = []
-        for doc in docs:
-            item = doc.to_dict()
-            item["id"] = doc.id
-            results.append(item)
-        return results
+        # Attempt 2: Fallback query without Firestore order_by; sort in Python memory
+        try:
+            fallback_query = query.limit(limit)
+            docs = list(fallback_query.stream())
+            results = []
+            for doc in docs:
+                item = doc.to_dict() or {}
+                item["id"] = doc.id
+                results.append(item)
+            results.sort(
+                key=lambda x: str(x.get("created_at") or x.get("timestamp") or ""),
+                reverse=True,
+            )
+            return results
+        except Exception as e:
+            logger.exception("Firestore fallback query failed: %s", e)
+            raise
 
     def update_review_status(
         self,
