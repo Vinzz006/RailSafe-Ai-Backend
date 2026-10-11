@@ -1,7 +1,7 @@
 """FastAPI Cloud Backend for RailGuard Vision on Render.
 
 Utilizes:
-- Cloud Firestore for distributed alert persistence (No persistent disk required)
+- Firebase Realtime Database for distributed alert persistence (No persistent disk required)
 - Firebase Authentication for verified operator role verification (Firebase ID Token)
 - Dedicated secret token (RAILGUARD_AGENT_TOKEN) for laptop edge camera ingestion
 - Path-traversal safe evidence delivery and WebSocket live push notifications
@@ -41,11 +41,11 @@ from src.config import SystemConfig, load_config
 from src.firebase_service import (
     download_evidence_blob,
     get_firebase_app,
-    get_firestore_db,
+    get_realtime_db,
     upload_evidence_blob,
     verify_firebase_id_token,
 )
-from src.firestore_repository import FirestoreAlertRepository
+from src.realtime_database_repository import RealtimeDatabaseAlertRepository
 
 # Configure sanitized logging
 logging.basicConfig(
@@ -101,23 +101,23 @@ ws_manager = WebSocketManager()
 # ============================================================================
 # Lazy Repository Access
 # ============================================================================
-_repository_instance: Optional[FirestoreAlertRepository] = None
+_repository_instance: Optional[RealtimeDatabaseAlertRepository] = None
 
 
-def get_repository() -> FirestoreAlertRepository:
-    """Lazily initialize and return the Firestore repository instance."""
+def get_repository() -> RealtimeDatabaseAlertRepository:
+    """Lazily initialize and return the Realtime Database repository instance."""
     global _repository_instance
     if _repository_instance is None:
         try:
             get_firebase_app(config.firebase)
-            _repository_instance = FirestoreAlertRepository(
-                collection_name=config.firebase.alerts_collection
+            _repository_instance = RealtimeDatabaseAlertRepository(
+                base_path=config.firebase.rtdb_alerts_path
             )
         except Exception as e:
-            logger.error("Failed to connect to Cloud Firestore: %s", e)
+            logger.error("Failed to connect to Firebase Realtime Database: %s", e)
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Cloud Firestore persistence layer is unavailable. Check server configuration.",
+                detail="Firebase Realtime Database persistence layer is unavailable. Check server configuration.",
             )
     return _repository_instance
 
@@ -127,9 +127,10 @@ def get_repository() -> FirestoreAlertRepository:
 # ============================================================================
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    logger.info("RailGuard Vision Cloud API initialized (Render Free / Firestore Mode).")
+    logger.info("RailGuard Vision Cloud API initialized (Render Free / Realtime Database Mode).")
     logger.info("Project ID: %s", config.firebase.project_id)
-    logger.info("Collection: %s", config.firebase.alerts_collection)
+    logger.info("Database URL: %s", config.firebase.database_url)
+    logger.info("Alerts Path: %s", config.firebase.rtdb_alerts_path)
     # Attempt non-blocking background initialization of Firebase
     try:
         get_firebase_app(config.firebase)
@@ -142,7 +143,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(
     title="RailGuard Vision API",
     version=config.app.version,
-    description="Early-warning unattended luggage screening assistance API with Firebase Firestore persistence.",
+    description="Early-warning unattended luggage screening assistance API with Firebase Realtime Database persistence.",
     lifespan=lifespan,
 )
 
@@ -318,8 +319,8 @@ class AlertResponse(BaseModel):
     )
 
 
-def serialize_firestore_alert(doc_data: Dict[str, Any]) -> AlertResponse:
-    """Serialize Firestore document data into standardized AlertResponse model."""
+def serialize_rtdb_alert(doc_data: Dict[str, Any]) -> AlertResponse:
+    """Serialize Realtime Database alert data into standardized AlertResponse model."""
     doc_id = doc_data.get("id") or doc_data.get("event_uid", "")
     snap_url = doc_data.get("snapshot_url") or f"/api/alerts/{doc_id}/snapshot"
     clip_url = doc_data.get("clip_url") or (f"/api/alerts/{doc_id}/clip" if doc_data.get("clip_key") else None)
@@ -359,6 +360,10 @@ def serialize_firestore_alert(doc_data: Dict[str, Any]) -> AlertResponse:
     )
 
 
+# Backward compatibility alias
+serialize_firestore_alert = serialize_rtdb_alert
+
+
 # ============================================================================
 # Safe Evidence Path Validation
 # ============================================================================
@@ -393,7 +398,8 @@ def root_info() -> Dict[str, Any]:
         "service": "RailGuard Vision Cloud Backend",
         "version": config.app.version,
         "status": "online",
-        "persistence": "Cloud Firestore",
+        "persistence": "Firebase Realtime Database",
+        "database_url": config.firebase.database_url,
         "endpoints": {
             "health": "/health",
             "readiness": "/ready",
@@ -406,31 +412,32 @@ def root_info() -> Dict[str, Any]:
 
 @app.get("/health", tags=["System"])
 def health_check() -> Dict[str, Any]:
-    """Lightweight health check for Render process monitoring (Independent of Firestore)."""
+    """Lightweight health check for Render process monitoring (Independent of Realtime Database)."""
     return {
         "status": "healthy",
         "service": "RailGuard Vision Cloud Backend",
         "version": config.app.version,
-        "persistence": "Cloud Firestore",
+        "persistence": "Firebase Realtime Database",
         "disclaimer": config.app.disclaimer,
     }
 
 
 @app.get("/ready", tags=["System"])
 def readiness_check(
-    repo: FirestoreAlertRepository = Depends(get_repository),
+    repo: RealtimeDatabaseAlertRepository = Depends(get_repository),
 ) -> Dict[str, Any]:
-    """Public readiness check confirming Firestore database accessibility without disclosing secrets."""
+    """Public readiness check confirming Realtime Database accessibility without disclosing secrets."""
     if not repo.check_readiness():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Firestore database unavailable.",
+            detail="Firebase Realtime Database unavailable.",
         )
     return {
         "status": "ready",
-        "firestore_connected": True,
+        "rtdb_connected": True,
         "project_id": config.firebase.project_id,
-        "collection": config.firebase.alerts_collection,
+        "database_url": config.firebase.database_url,
+        "alerts_path": config.firebase.rtdb_alerts_path,
     }
 
 
@@ -453,9 +460,9 @@ async def ingest_alert(
     snapshot: UploadFile = File(...),
     clip: Optional[UploadFile] = File(None),
     _token: str = Depends(verify_agent_token),
-    repo: FirestoreAlertRepository = Depends(get_repository),
+    repo: RealtimeDatabaseAlertRepository = Depends(get_repository),
 ) -> Dict[str, Any]:
-    """Ingest an alert and evidence from the station laptop into Firestore.
+    """Ingest an alert and evidence from the station laptop into Firebase Realtime Database.
     
     Guaranteed idempotent using event_uid as document key.
     """
@@ -467,7 +474,7 @@ async def ingest_alert(
     # 1. Check for duplicate upload (Idempotency)
     existing = repo.get_alert(event_uid)
     if existing:
-        logger.info("Alert %s already exists in Firestore. Suppressing duplicate insert.", event_uid)
+        logger.info("Alert %s already exists in Realtime Database. Suppressing duplicate insert.", event_uid)
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={
@@ -523,7 +530,7 @@ async def ingest_alert(
             config=config.firebase,
         )
 
-    # 3. Create document in Cloud Firestore
+    # 3. Create document in Firebase Realtime Database
     doc_data = {
         "event_uid": event_uid,
         "timestamp": timestamp,
@@ -547,15 +554,15 @@ async def ingest_alert(
     if created_alert:
         await ws_manager.broadcast({
             "event": "new_alert",
-            "alert": serialize_firestore_alert(created_alert).model_dump(),
+            "alert": serialize_rtdb_alert(created_alert).model_dump(),
         })
 
-    logger.info("Alert %s successfully ingested into Firestore.", doc_id)
+    logger.info("Alert %s successfully ingested into Realtime Database.", doc_id)
     return {
         "status": "created",
         "alert_id": doc_id,
         "event_uid": event_uid,
-        "message": "Alert successfully recorded in Cloud Firestore.",
+        "message": "Alert successfully recorded in Firebase Realtime Database.",
     }
 
 
@@ -563,9 +570,9 @@ async def ingest_alert(
 async def ingest_alert_cleared(
     req: ClearAlertRequest,
     _token: str = Depends(verify_agent_token),
-    repo: FirestoreAlertRepository = Depends(get_repository),
+    repo: RealtimeDatabaseAlertRepository = Depends(get_repository),
 ) -> Dict[str, Any]:
-    """Update Firestore when luggage is retrieved or moved on the platform."""
+    """Update Realtime Database when luggage is retrieved or moved on the platform."""
     rows = repo.update_cleared_timestamp(
         camera_id=req.camera_id,
         track_id=req.track_id,
@@ -590,9 +597,9 @@ def get_alerts(
     unreviewed_only: bool = Query(False),
     status_filter: Optional[str] = Query(None, alias="status"),
     _user: Dict[str, Any] = Depends(verify_firebase_operator),
-    repo: FirestoreAlertRepository = Depends(get_repository),
+    repo: RealtimeDatabaseAlertRepository = Depends(get_repository),
 ) -> List[AlertResponse]:
-    """Retrieve security alerts from Cloud Firestore."""
+    """Retrieve security alerts from Firebase Realtime Database."""
     if status_filter and status_filter.lower() in ("all", ""):
         status_filter = None
     elif status_filter and status_filter not in ("verified", "false_alarm", "unreviewed"):
@@ -603,11 +610,11 @@ def get_alerts(
 
     try:
         docs = repo.list_alerts(limit=limit, review_status=status_filter, unreviewed_only=unreviewed_only)
-        return [serialize_firestore_alert(d) for d in docs]
+        return [serialize_rtdb_alert(d) for d in docs]
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("Failed to query alerts from Firestore in /api/alerts: %s", e)
+        logger.exception("Failed to query alerts from Realtime Database in /api/alerts: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve alerts from persistence layer.",
@@ -618,13 +625,13 @@ def get_alerts(
 def get_alert_detail(
     alert_id: str,
     _user: Dict[str, Any] = Depends(verify_firebase_operator),
-    repo: FirestoreAlertRepository = Depends(get_repository),
+    repo: RealtimeDatabaseAlertRepository = Depends(get_repository),
 ) -> AlertResponse:
-    """Retrieve single alert details from Cloud Firestore."""
+    """Retrieve single alert details from Firebase Realtime Database."""
     doc = repo.get_alert(alert_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Alert not found.")
-    return serialize_firestore_alert(doc)
+    return serialize_rtdb_alert(doc)
 
 
 @app.patch("/api/alerts/{alert_id}/review", tags=["Alerts"], response_model=AlertResponse)
@@ -633,7 +640,7 @@ async def update_alert_review(
     alert_id: str,
     req: ReviewUpdateRequest,
     user: Dict[str, Any] = Depends(verify_firebase_operator),
-    repo: FirestoreAlertRepository = Depends(get_repository),
+    repo: RealtimeDatabaseAlertRepository = Depends(get_repository),
 ) -> AlertResponse:
     """Record operator verification or false-alarm review with reviewer UID audit."""
     if req.review_status not in ("verified", "false_alarm"):
@@ -661,15 +668,15 @@ async def update_alert_review(
         "reviewed_by": operator_uid,
     })
 
-    return serialize_firestore_alert(updated_doc)
+    return serialize_rtdb_alert(updated_doc)
 
 
 @app.get("/api/alerts/stats/false-alarm-rate", tags=["Alerts"])
 def get_false_alarm_rate(
     _user: Dict[str, Any] = Depends(verify_firebase_operator),
-    repo: FirestoreAlertRepository = Depends(get_repository),
+    repo: RealtimeDatabaseAlertRepository = Depends(get_repository),
 ) -> Dict[str, Any]:
-    """Retrieve false alarm rate computed from Firestore operator reviews."""
+    """Retrieve false alarm rate computed from Realtime Database operator reviews."""
     rate, total, false_alarms = repo.get_false_alarm_rate()
     return {
         "false_alarm_rate": rate,
@@ -686,7 +693,7 @@ def get_false_alarm_rate(
 def get_alert_snapshot(
     alert_id: str,
     _user: Dict[str, Any] = Depends(verify_firebase_operator),
-    repo: FirestoreAlertRepository = Depends(get_repository),
+    repo: RealtimeDatabaseAlertRepository = Depends(get_repository),
 ) -> Response:
     """Retrieve verified JPEG snapshot evidence for an alert."""
     doc = repo.get_alert(alert_id)
@@ -722,7 +729,7 @@ def get_alert_snapshot(
 def get_alert_clip(
     alert_id: str,
     _user: Dict[str, Any] = Depends(verify_firebase_operator),
-    repo: FirestoreAlertRepository = Depends(get_repository),
+    repo: RealtimeDatabaseAlertRepository = Depends(get_repository),
 ) -> Response:
     """Retrieve contextual MP4 video clip for an alert."""
     doc = repo.get_alert(alert_id)
