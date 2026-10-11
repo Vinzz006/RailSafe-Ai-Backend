@@ -75,6 +75,14 @@ class SecurityConfig:
     agent_token: str = "dev-agent-token-change-in-production"
     max_upload_bytes: int = 30 * 1024 * 1024  # 30 MB
     rate_limit_per_minute: int = 120
+    cors_allowed_origins: List[str] = field(
+        default_factory=lambda: [
+            "http://localhost:54313",
+            "http://127.0.0.1:54313",
+            "http://localhost:3000",
+            "http://localhost:8000",
+        ]
+    )
 
 
 @dataclass
@@ -215,6 +223,18 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> SystemConfig:
     env_agent_token = os.getenv("RAILGUARD_AGENT_TOKEN")
     if env_agent_token:
         security_data["agent_token"] = env_agent_token
+
+    env_cors = os.getenv("CORS_ALLOWED_ORIGINS")
+    if env_cors:
+        origins = []
+        for item in env_cors.split(","):
+            cleaned = item.strip().rstrip("/")
+            if cleaned and cleaned not in origins:
+                origins.append(cleaned)
+        # Ensure development origin is included unless explicitly restricted
+        if "http://localhost:54313" not in origins:
+            origins.append("http://localhost:54313")
+        security_data["cors_allowed_origins"] = origins
 
     # Firebase environment variable overrides
     firebase_data = raw.get("firebase", {})
